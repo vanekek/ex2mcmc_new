@@ -31,7 +31,7 @@ class BaseVAE(nn.Module):
         pass
 
 
-class BetaVAE(BaseVAE):
+class VAE(BaseVAE):
 
     num_iter = 0 # Global static variable to keep track of iterations
 
@@ -45,7 +45,7 @@ class BetaVAE(BaseVAE):
                  Capacity_max_iter: int = 1e5,
                  loss_type:str = 'B',
                  **kwargs) -> None:
-        super(BetaVAE, self).__init__()
+        super(VAE, self).__init__()
 
         self.latent_dim = latent_dim
         self.beta = beta
