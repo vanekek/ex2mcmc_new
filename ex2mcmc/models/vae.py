@@ -36,7 +36,7 @@ class VAE(BaseVAE):
     num_iter = 0 # Global static variable to keep track of iterations
 
     def __init__(self,
-                 in_channels: int,
+                 input_size: int,
                  latent_dim: int,
                  hidden_dims: List = None,
                  beta: int = 4,
@@ -56,62 +56,80 @@ class VAE(BaseVAE):
 
         modules = []
         if hidden_dims is None:
-            hidden_dims = [32, 64, 128, 256, 512]
-
+            hidden_dims = [100]
+        
         # Build Encoder
         for h_dim in hidden_dims:
             modules.append(
-                nn.Sequential(
-                    nn.Conv2d(in_channels, out_channels=h_dim,
-                              kernel_size= 3, stride= 2, padding  = 1),
-                    nn.BatchNorm2d(h_dim),
-                    nn.LeakyReLU())
-            )
-            in_channels = h_dim
+                 nn.Sequential(
+                     nn.Linear(input_size, h_dim),
+                     nn.LeakyReLU())
+             )
+             input_size = h_dim
+
+        # Build Encoder
+        # for h_dim in hidden_dims:
+        #     modules.append(
+        #         nn.Sequential(
+        #             nn.Conv2d(in_channels, out_channels=h_dim,
+        #                       kernel_size= 3, stride= 2, padding  = 1),
+        #             nn.BatchNorm2d(h_dim),
+        #             nn.LeakyReLU())
+        #     )
+        #     in_channels = h_dim
+        
 
         self.encoder = nn.Sequential(*modules)
-        self.fc_mu = nn.Linear(hidden_dims[-1]*4, latent_dim)
-        self.fc_var = nn.Linear(hidden_dims[-1]*4, latent_dim)
+        self.fc_mu = nn.Linear(hidden_dims[-1], latent_dim)
+        self.fc_var = nn.Linear(hidden_dims[-1], latent_dim)
 
 
         # Build Decoder
         modules = []
 
-        self.decoder_input = nn.Linear(latent_dim, hidden_dims[-1] * 4)
+        self.decoder_input = nn.Linear(latent_dim, hidden_dims[-1])
 
         hidden_dims.reverse()
 
-        for i in range(len(hidden_dims) - 1):
-            modules.append(
-                nn.Sequential(
-                    nn.ConvTranspose2d(hidden_dims[i],
-                                       hidden_dims[i + 1],
-                                       kernel_size=3,
-                                       stride = 2,
-                                       padding=1,
-                                       output_padding=1),
-                    nn.BatchNorm2d(hidden_dims[i + 1]),
-                    nn.LeakyReLU())
+        modules.append(
+            nn.Sequential(
+                nn.Linear(hidden_dims[0], hidden_dims[0])
+                nn.LeakyReLU()
             )
+        )
+
+        # for i in range(len(hidden_dims) - 1):
+        #     modules.append(
+        #         nn.Sequential(
+        #             nn.ConvTranspose2d(hidden_dims[i],
+        #                                hidden_dims[i + 1],
+        #                                kernel_size=3,
+        #                                stride = 2,
+        #                                padding=1,
+        #                                output_padding=1),
+        #             nn.BatchNorm2d(hidden_dims[i + 1]),
+        #             nn.LeakyReLU())
+        #     )
 
 
 
         self.decoder = nn.Sequential(*modules)
 
-        self.final_layer = nn.Sequential(
-                            nn.ConvTranspose2d(hidden_dims[-1],
-                                               hidden_dims[-1],
-                                               kernel_size=3,
-                                               stride=2,
-                                               padding=1,
-                                               output_padding=1),
-                            nn.BatchNorm2d(hidden_dims[-1]),
-                            nn.LeakyReLU(),
-                            nn.Conv2d(hidden_dims[-1], out_channels= 3,
-                                      kernel_size= 3, padding= 1),
-                            nn.Tanh())
+        self.final_layer = nn.Linear(hidden_dims[-1], input_size)
+        # nn.Sequential(
+        #                     nn.ConvTranspose2d(hidden_dims[-1],
+        #                                        hidden_dims[-1],
+        #                                        kernel_size=3,
+        #                                        stride=2,
+        #                                        padding=1,
+        #                                        output_padding=1),
+        #                     nn.BatchNorm2d(hidden_dims[-1]),
+        #                     nn.LeakyReLU(),
+        #                     nn.Conv2d(hidden_dims[-1], out_channels= 3,
+        #                               kernel_size= 3, padding= 1),
+        #                     nn.Tanh())
 
-    def encode(self, input: Tensor) -> List[Tensor]:
+    def forward(self, input: Tensor) -> List[Tensor]:
         """
         Encodes the input by passing through the encoder network
         and returns the latent codes.
@@ -128,7 +146,7 @@ class VAE(BaseVAE):
 
         return [mu, log_var]
 
-    def decode(self, z: Tensor) -> Tensor:
+    def inverse(self, z: Tensor) -> Tensor:
         result = self.decoder_input(z)
         result = result.view(-1, 512, 2, 2)
         result = self.decoder(result)
@@ -147,10 +165,10 @@ class VAE(BaseVAE):
         eps = torch.randn_like(std)
         return eps * std + mu
 
-    def forward(self, input: Tensor, **kwargs) -> Tensor:
-        mu, log_var = self.encode(input)
-        z = self.reparameterize(mu, log_var)
-        return  [self.decode(z), input, mu, log_var]
+    # def forward(self, input: Tensor, **kwargs) -> Tensor:
+    #     mu, log_var = self.encode(input)
+    #     z = self.reparameterize(mu, log_var)
+    #     return  [self.decode(z), input, mu, log_var]
 
     def loss_function(self,
                       *args,
@@ -195,14 +213,32 @@ class VAE(BaseVAE):
         samples = self.decode(z)
         return samples
 
-    def generate(self, x: Tensor, **kwargs) -> Tensor:
-        """
-        Given an input image x, returns the reconstructed image
-        :param x: (Tensor) [B x C x H x W]
-        :return: (Tensor) [B x C x H x W]
-        """
+    # def log_prob(self, x):
+    #     z = self.encode(x)
+    #     log_Pr = torch.distributions.Normal(loc=torch.tensor(0., device=x.device, dtype=torch.float32),
+    #                                             scale=torch.tensor(1., device=x.device, dtype=torch.float32)).log_prob(
+    #             z).sum(-1)
 
-        return self.forward(x)[0]
+    #     def get_likelihood(self, x_reconst, x):
+    #         x_reconst = x_reconst.view(x_reconst.shape[0], -1)
+    #         likelihood = torch.distributions.Normal(loc=x_reconst,
+    #                                                 scale=self.sigma * torch.ones_like(x_reconst)).log_prob(
+    #             x.view(*x_reconst.shape)).sum(-1)
+
+    #         return likelihood
+
+    #     likelihood = self.get_likelihood(x_reconst, x)
+    #     return likelihood + log_Pr
+
+
+    # def generate(self, x: Tensor, **kwargs) -> Tensor:
+    #     """
+    #     Given an input image x, returns the reconstructed image
+    #     :param x: (Tensor) [B x C x H x W]
+    #     :return: (Tensor) [B x C x H x W]
+    #     """
+
+    #     return self.forward(x)[0]
 
 class VaeMCMC:
     def __init__(self, target, proposal, device, flow, mcmc_call: callable, **kwargs):

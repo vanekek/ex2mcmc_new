@@ -86,3 +86,56 @@ class MixKLLoss(nn.Module):
             y,
             alpha=alpha,
         )
+
+class Vae_loss(nn.Module):
+    def __init__(
+        self,
+        target,
+        proposal,
+        flow,
+        alpha=0.99,
+        beta=0.0,
+        gamma=0.99,
+    ):  # .2):#.99):
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.flow = flow
+        self.target = target
+        self.proposal = proposal
+
+    def forward(self, y, acc_rate=1.0, alpha=None, beta=None, gamma=None):
+        alpha = alpha if alpha is not None else self.alpha
+        beta = beta if beta is not None else self.beta
+        gamma = gamma if gamma is not None else self.gamma
+
+        return mix_kl(
+            self.target,
+            self.proposal,
+            self.flow,
+            y,
+            alpha=alpha,
+        )
+        
+        self.num_iter += 1
+        recons = args[0]
+        input = args[1]
+        mu = args[2]
+        log_var = args[3]
+        kld_weight = kwargs['M_N']  # Account for the minibatch samples from the dataset
+
+        recons_loss =F.mse_loss(recons, input)
+
+        kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
+
+        if self.loss_type == 'H': # https://openreview.net/forum?id=Sy2fzU9gl
+            loss = recons_loss + self.beta * kld_weight * kld_loss
+        elif self.loss_type == 'B': # https://arxiv.org/pdf/1804.03599.pdf
+            self.C_max = self.C_max.to(input.device)
+            C = torch.clamp(self.C_max/self.C_stop_iter * self.num_iter, 0, self.C_max.data[0])
+            loss = recons_loss + self.gamma * kld_weight* (kld_loss - C).abs()
+        else:
+            raise ValueError('Undefined loss type.')
+
+        return {'loss': loss, 'Reconstruction_Loss':recons_loss, 'KLD':kld_loss}
