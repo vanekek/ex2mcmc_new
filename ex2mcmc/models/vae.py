@@ -203,3 +203,104 @@ class BetaVAE(BaseVAE):
         """
 
         return self.forward(x)[0]
+
+class VaeMCMC:
+    def __init__(self, target, proposal, device, flow, mcmc_call: callable, **kwargs):
+        self.flow = flow
+        self.proposal = proposal
+        self.target = target
+        self.device = device
+        self.batch_size = kwargs.get("batch_size", 64)
+        self.mcmc_call = mcmc_call
+        self.grad_clip = kwargs.get("grad_clip", 1.0)
+        self.jump_tol = kwargs.get("jump_tol", 1e6)
+        optimizer = kwargs.get("optimizer", "adam")
+        loss = kwargs.get("loss", "mix_kl")
+        self.flow.to(self.device)
+        if isinstance(loss, (Callable, nn.Module)):
+            self.loss = loss
+        elif isinstance(loss, str):
+            self.loss = get_loss(loss)(self.target, self.proposal, self.flow)
+        else:
+            ValueError
+
+        lr = kwargs.get("lr", 1e-3)
+        wd = kwargs.get("wd", 1e-4)
+        if isinstance(optimizer, torch.optim.Optimizer):
+            self.optimizer = optimizer
+        elif isinstance(optimizer, str):
+            if optimizer.lower() == "adam":
+                self.optimizer = torch.optim.Adam(
+                    flow.parameters(), lr=lr, weight_decay=wd
+                )
+
+        self.loss_hist = []
+
+    def train_step(self, inp=None, alpha=0.5, do_step=True, inv=True):
+        if do_step:
+            self.optimizer.zero_grad()
+        if inp is None:
+            inp = self.proposal.sample((self.batch_size,))
+        elif inv:
+            inp, _ = self.flow.forward(inp)
+        out = self.mcmc_call(inp, self.target, self.proposal, flow=self.flow)
+        if isinstance(out, Tuple):
+            acc_rate = out[1].mean()
+            out = out[0]
+        else:
+            acc_rate = 1
+        out = out[-1]
+        out = out.to(self.device)
+        nll = -self.target.log_prob(out).mean().item()
+
+        if do_step:
+            loss_est, loss = self.loss(out, acc_rate=acc_rate, alpha=alpha)
+
+            if (
+                len(self.loss_hist) > 0
+                and loss.item() - self.loss_hist[-1] > self.jump_tol
+            ) or torch.isnan(loss):
+                print("KL wants to jump, terminating learning")
+                return out, nll
+
+            self.loss_hist = self.loss_hist[-500:] + [loss_est.item()]
+            self.optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                self.flow.parameters(),
+                self.grad_clip,
+            )
+            self.optimizer.step()
+
+        return out, nll
+
+    def train(self, n_steps=100, start_optim=10, init_points=None, alpha=None):
+        samples = []
+        inp = self.proposal.sample((self.batch_size,))
+
+        neg_log_likelihood = []
+
+        for step_id in trange(n_steps):
+            # if alpha is not None:
+            #    if isinstance(alpha, Callable):
+            #        a = alpha(step_id)
+            #    elif isinstance(alpha, float):
+            #        a = alpha
+            # else:
+            a = min(0.5, 3 * step_id / n_steps)
+
+            out, nll = self.train_step(
+                alpha=a,
+                do_step=step_id >= start_optim,
+                inp=init_points if step_id == 0 and init_points is not None else inp,
+                inv=True,
+            )
+            inp = out.detach().requires_grad_()
+            samples.append(inp.detach().cpu())
+
+            neg_log_likelihood.append(nll)
+
+        return samples, neg_log_likelihood
+
+    def sample(self):
+        pass
