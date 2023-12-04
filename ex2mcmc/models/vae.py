@@ -1,6 +1,8 @@
 import torch
-from models import BaseVAE
+from tqdm import trange
+# from models import BaseVAE
 from torch import nn
+from sampling_utils.adaptive_sir_loss import Vae_loss
 from torch.nn import functional as F
 from .types_ import *
 from abc import abstractmethod
@@ -65,7 +67,7 @@ class VAE(BaseVAE):
                      nn.Linear(input_size, h_dim),
                      nn.LeakyReLU())
              )
-             input_size = h_dim
+            input_size = h_dim
 
         # Build Encoder
         # for h_dim in hidden_dims:
@@ -93,7 +95,7 @@ class VAE(BaseVAE):
 
         modules.append(
             nn.Sequential(
-                nn.Linear(hidden_dims[0], hidden_dims[0])
+                nn.Linear(hidden_dims[0], hidden_dims[0]),
                 nn.LeakyReLU()
             )
         )
@@ -144,14 +146,17 @@ class VAE(BaseVAE):
         mu = self.fc_mu(result)
         log_var = self.fc_var(result)
 
-        return [mu, log_var]
+        prob = 0
+        return [mu, log_var], prob
 
     def inverse(self, z: Tensor) -> Tensor:
         result = self.decoder_input(z)
         result = result.view(-1, 512, 2, 2)
         result = self.decoder(result)
         result = self.final_layer(result)
-        return result
+
+        prob = 0
+        return result, prob
 
     def reparameterize(self, mu: Tensor, logvar: Tensor) -> Tensor:
         """
@@ -170,30 +175,30 @@ class VAE(BaseVAE):
     #     z = self.reparameterize(mu, log_var)
     #     return  [self.decode(z), input, mu, log_var]
 
-    def loss_function(self,
-                      *args,
-                      **kwargs) -> dict:
-        self.num_iter += 1
-        recons = args[0]
-        input = args[1]
-        mu = args[2]
-        log_var = args[3]
-        kld_weight = kwargs['M_N']  # Account for the minibatch samples from the dataset
+    # def loss_function(self,
+    #                   *args,
+    #                   **kwargs) -> dict:
+    #     self.num_iter += 1
+    #     recons = args[0]
+    #     input = args[1]
+    #     mu = args[2]
+    #     log_var = args[3]
+    #     kld_weight = kwargs['M_N']  # Account for the minibatch samples from the dataset
 
-        recons_loss =F.mse_loss(recons, input)
+    #     recons_loss =F.mse_loss(recons, input)
 
-        kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
+    #     kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
 
-        if self.loss_type == 'H': # https://openreview.net/forum?id=Sy2fzU9gl
-            loss = recons_loss + self.beta * kld_weight * kld_loss
-        elif self.loss_type == 'B': # https://arxiv.org/pdf/1804.03599.pdf
-            self.C_max = self.C_max.to(input.device)
-            C = torch.clamp(self.C_max/self.C_stop_iter * self.num_iter, 0, self.C_max.data[0])
-            loss = recons_loss + self.gamma * kld_weight* (kld_loss - C).abs()
-        else:
-            raise ValueError('Undefined loss type.')
+    #     if self.loss_type == 'H': # https://openreview.net/forum?id=Sy2fzU9gl
+    #         loss = recons_loss + self.beta * kld_weight * kld_loss
+    #     elif self.loss_type == 'B': # https://arxiv.org/pdf/1804.03599.pdf
+    #         self.C_max = self.C_max.to(input.device)
+    #         C = torch.clamp(self.C_max/self.C_stop_iter * self.num_iter, 0, self.C_max.data[0])
+    #         loss = recons_loss + self.gamma * kld_weight* (kld_loss - C).abs()
+    #     else:
+    #         raise ValueError('Undefined loss type.')
 
-        return {'loss': loss, 'Reconstruction_Loss':recons_loss, 'KLD':kld_loss}
+    #     return {'loss': loss, 'Reconstruction_Loss':recons_loss, 'KLD':kld_loss}
 
     def sample(self,
                num_samples:int,
@@ -251,14 +256,15 @@ class VaeMCMC:
         self.grad_clip = kwargs.get("grad_clip", 1.0)
         self.jump_tol = kwargs.get("jump_tol", 1e6)
         optimizer = kwargs.get("optimizer", "adam")
-        loss = kwargs.get("loss", "mix_kl")
+        # loss = kwargs.get("loss", "mix_kl")
         self.flow.to(self.device)
-        if isinstance(loss, (Callable, nn.Module)):
-            self.loss = loss
-        elif isinstance(loss, str):
-            self.loss = get_loss(loss)(self.target, self.proposal, self.flow)
-        else:
-            ValueError
+        # if isinstance(loss, (Callable, nn.Module)):
+        #     self.loss = loss
+        # elif isinstance(loss, str):
+        #     self.loss = get_loss(loss)(self.target, self.proposal, self.flow)
+        # else:
+        #     ValueError
+        self.loss = Vae_loss(self.flow, 0.005, 4)
 
         lr = kwargs.get("lr", 1e-3)
         wd = kwargs.get("wd", 1e-4)
@@ -270,7 +276,7 @@ class VaeMCMC:
                     flow.parameters(), lr=lr, weight_decay=wd
                 )
 
-        self.loss_hist = []
+        # self.loss_hist = []
 
     def train_step(self, inp=None, alpha=0.5, do_step=True, inv=True):
         if do_step:
@@ -290,16 +296,18 @@ class VaeMCMC:
         nll = -self.target.log_prob(out).mean().item()
 
         if do_step:
-            loss_est, loss = self.loss(out, acc_rate=acc_rate, alpha=alpha)
+            # loss_est, loss = self.loss(out, acc_rate=acc_rate, alpha=alpha)
 
-            if (
-                len(self.loss_hist) > 0
-                and loss.item() - self.loss_hist[-1] > self.jump_tol
-            ) or torch.isnan(loss):
-                print("KL wants to jump, terminating learning")
-                return out, nll
+            loss = self.loss(out, acc_rate=acc_rate, alpha=alpha)
 
-            self.loss_hist = self.loss_hist[-500:] + [loss_est.item()]
+            # if (
+            #     len(self.loss_hist) > 0
+            #     and loss.item() - self.loss_hist[-1] > self.jump_tol
+            # ) or torch.isnan(loss):
+            #     print("KL wants to jump, terminating learning")
+            #     return out, nll
+
+            # self.loss_hist = self.loss_hist[-500:] + [loss_est.item()]
             self.optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(
